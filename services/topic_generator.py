@@ -1,133 +1,59 @@
 """
 services/topic_generator.py - Conversation Starter Generator
 
-Uses the GPT-2 Small text-generation pipeline to produce personalized
-networking conversation starters based on extracted event themes and
+Uses the OpenRouter LLM API to produce personalized networking
+conversation starters based on extracted event themes and
 user-provided interests.
 
-The pipeline is initialized once at module import time (singleton pattern)
-to avoid repeated model loading overhead across API requests.
+Replaces the previous GPT-2 local pipeline for faster, higher-quality output.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import Any
 
-from transformers import pipeline
-
-from backend.config import (
-    MAX_NEW_TOKENS,
-    NUM_STARTERS,
-    TEMPERATURE,
-    TEXT_GEN_MODEL,
-    TOP_P,
-)
+from backend.config import NUM_STARTERS, TEMPERATURE
+from services.openrouter_client import chat_completion
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Model Loading (singleton)
+# Prompts
 # ---------------------------------------------------------------------------
 
-_generator: Any = None
+_SYSTEM_PROMPT = (
+    "You are a professional networking coach who creates engaging, natural, "
+    "and personalized conversation starters for professional networking events. "
+    "Your starters are thoughtful, open-ended, and encourage meaningful dialogue. "
+    "Always respond with valid JSON only — no markdown, no explanations."
+)
 
+_USER_PROMPT_TEMPLATE = """\
+Generate exactly {num} unique, engaging networking conversation starters for the following context:
 
-def _get_generator() -> Any:
-    """
-    Lazily load and cache the text-generation pipeline.
+Event Themes: {themes}
+User's Personal Interests: {interests}
 
-    Returns
-    -------
-    transformers.Pipeline
-        Loaded text-generation pipeline.
-    """
-    global _generator
-    if _generator is None:
-        logger.info("Loading text-generation model: %s", TEXT_GEN_MODEL)
-        _generator = pipeline(
-            "text-generation",
-            model=TEXT_GEN_MODEL,
-            pad_token_id=50256,  # EOS token used as pad for GPT-2
-        )
-        logger.info("Text-generation pipeline ready.")
-    return _generator
+Requirements:
+- Each starter must be a single, natural-sounding open-ended question or statement
+- Personalize them using the user's interests when possible
+- Make them specific to the event themes, not generic
+- Vary the style: some can be questions, some can be observations that invite discussion
+- Each starter should be 15–40 words long
+- Do NOT repeat similar starters
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-# Prompt templates to encourage diversity in generated starters
-_PROMPT_TEMPLATES: list[str] = [
-    "As someone interested in {interests}, at an event about {themes}, "
-    "a great conversation starter would be: \"",
-    "Networking question about {themes} for someone passionate about {interests}: \"",
-    "At a {themes} conference, an engaging opening question related to {interests} is: \"",
-]
-
-
-def _build_prompt(themes: list[str], user_interests: list[str], template_idx: int) -> str:
-    """
-    Build a prompt string from themes and interests using a template.
-
-    Parameters
-    ----------
-    themes : list[str]
-        Top event themes.
-    user_interests : list[str]
-        User's personal interests.
-    template_idx : int
-        Index to select which prompt template to use.
-
-    Returns
-    -------
-    str
-        Formatted prompt string.
-    """
-    theme_str = ", ".join(themes[:3]) if themes else "technology"
-    interest_str = ", ".join(user_interests[:3]) if user_interests else "innovation"
-    template = _PROMPT_TEMPLATES[template_idx % len(_PROMPT_TEMPLATES)]
-    return template.format(themes=theme_str, interests=interest_str)
-
-
-def _clean_output(raw_text: str, prompt: str) -> str:
-    """
-    Extract and clean the generated continuation from the raw model output.
-
-    Parameters
-    ----------
-    raw_text : str
-        Full generated text (prompt + continuation).
-    prompt : str
-        The original prompt used for generation.
-
-    Returns
-    -------
-    str
-        Cleaned conversation starter sentence.
-    """
-    # Remove the prompt prefix
-    continuation = raw_text[len(prompt):].strip()
-
-    # Extract text up to the first closing quote or sentence boundary
-    for delimiter in ['"', "?", "!", ".\n", "\n"]:
-        idx = continuation.find(delimiter)
-        if idx > 0:
-            continuation = continuation[: idx + 1]
-            break
-
-    # Remove residual quotes and excess whitespace
-    continuation = re.sub(r'"+', '"', continuation).strip()
-    continuation = continuation.strip('"').strip()
-
-    # Ensure it ends with proper punctuation
-    if continuation and continuation[-1] not in ".!?":
-        continuation += "?"
-
-    return continuation if len(continuation) > 10 else ""
+Return ONLY a JSON object in this exact format:
+{{
+  "starters": [
+    "Starter 1 text here?",
+    "Starter 2 text here.",
+    "Starter 3 text here?"
+  ]
+}}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +66,7 @@ def generate_starters(
     user_interests: list[str] | None = None,
 ) -> list[str]:
     """
-    Generate personalized networking conversation starters.
+    Generate personalized networking conversation starters via OpenRouter.
 
     Parameters
     ----------
@@ -159,56 +85,108 @@ def generate_starters(
     ValueError
         If no themes are provided.
     RuntimeError
-        If the text-generation pipeline fails.
+        If the API call fails and fallback also fails.
     """
     if not themes:
         raise ValueError("At least one theme is required to generate starters.")
 
     interests = user_interests or []
-    gen = _get_generator()
-    starters: list[str] = []
-    seen: set[str] = set()
+    theme_str = ", ".join(themes[:5])
+    interest_str = ", ".join(interests[:5]) if interests else "professional innovation and technology"
 
-    attempts = 0
-    max_attempts = NUM_STARTERS * 3  # Allow retries for duplicates
+    user_prompt = _USER_PROMPT_TEMPLATE.format(
+        num=NUM_STARTERS,
+        themes=theme_str,
+        interests=interest_str,
+    )
 
-    while len(starters) < NUM_STARTERS and attempts < max_attempts:
-        template_idx = attempts % len(_PROMPT_TEMPLATES)
-        prompt = _build_prompt(themes, interests, template_idx)
+    logger.info(
+        "Generating %d conversation starters via OpenRouter (themes=%s)...",
+        NUM_STARTERS,
+        themes[:3],
+    )
 
-        try:
-            outputs = gen(
-                prompt,
-                max_new_tokens=MAX_NEW_TOKENS,
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                do_sample=True,
-                num_return_sequences=1,
-            )
-            raw_text = outputs[0]["generated_text"]
-            cleaned = _clean_output(raw_text, prompt)
+    try:
+        raw_response = chat_completion(
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=TEMPERATURE,
+            max_tokens=600,
+        )
+        starters = _parse_starters_response(raw_response)
 
-            if cleaned and cleaned not in seen:
-                starters.append(cleaned)
-                seen.add(cleaned)
-                logger.debug("Generated starter: %s", cleaned)
+        if len(starters) >= NUM_STARTERS:
+            logger.info("Generated %d starters successfully.", len(starters))
+            return starters[:NUM_STARTERS]
+        elif starters:
+            # We have some valid starters, but not enough. Pad with fallbacks.
+            logger.warning("Only got %d valid starters, padding with fallbacks.", len(starters))
+            fallbacks = _fallback_starters(themes, interests)
+            for fb in fallbacks:
+                if fb not in starters:
+                    starters.append(fb)
+                if len(starters) == NUM_STARTERS:
+                    break
+            return starters
 
-        except Exception as exc:
-            logger.warning("Generation attempt %d failed: %s", attempts, exc)
+    except Exception as exc:
+        logger.warning("Primary generation failed: %s – using fallback.", exc)
 
-        attempts += 1
+    # Fallback starters
+    return _fallback_starters(themes, interests)
 
-    # Fallback starters if generation didn't produce enough
+
+# ---------------------------------------------------------------------------
+# Private Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_starters_response(raw: str) -> list[str]:
+    """
+    Parse the JSON response from the LLM and extract conversation starters.
+
+    Parameters
+    ----------
+    raw : str
+        Raw string response from the model.
+
+    Returns
+    -------
+    list[str]
+        Parsed list of conversation starters.
+    """
+    # Strip markdown code fences
+    cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
+
+    try:
+        data = json.loads(cleaned)
+        starters = data.get("starters", [])
+        if isinstance(starters, list) and starters:
+            # Filter out empty/too-short starters
+            valid = [s.strip() for s in starters if isinstance(s, str) and len(s.strip()) > 10]
+            return valid
+    except (json.JSONDecodeError, KeyError) as exc:
+        logger.warning("Starters JSON parse error: %s | raw=%.200s", exc, raw)
+
+    # Try to extract bullet/numbered list as fallback
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
+    starters = []
+    for line in lines:
+        # Remove numbering/bullets
+        cleaned_line = re.sub(r"^[\d\.\-\*\•]+\s*", "", line).strip().strip('"')
+        if len(cleaned_line) > 20:
+            starters.append(cleaned_line)
+    return starters
+
+
+def _fallback_starters(themes: list[str], interests: list[str]) -> list[str]:
+    """Generate template-based fallback starters when the API fails."""
+    theme = themes[0] if themes else "technology"
+    interest = interests[0] if interests else "innovation"
+
     fallbacks = [
-        f"How are you applying {themes[0]} in your current work?",
-        f"What excites you most about the future of {themes[0]}?",
-        f"Have you seen any interesting {themes[0]} projects recently?",
+        f"How are you currently applying {theme} in your work, and what challenges have you encountered?",
+        f"As someone passionate about {interest}, what excites you most about where {theme} is heading?",
+        f"Have you seen any {theme} projects recently that you think are going to make a real difference?",
     ]
-    while len(starters) < NUM_STARTERS:
-        fb = fallbacks[len(starters) % len(fallbacks)]
-        if fb not in seen:
-            starters.append(fb)
-            seen.add(fb)
-
-    logger.info("Generated %d conversation starters.", len(starters))
-    return starters[:NUM_STARTERS]
+    return fallbacks[:NUM_STARTERS]

@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "feedback_id": "75aa4ace-e850-4db6-aebd-f7924c67f77a",
+    "conversation_id": "d217f8bc-b4c6-47ec-943e-5b7039576dc5",
+    "thumbs_up": true,
+    "thumbs_down": false,
+    "comment": "dfbfg",
+    "timestamp": "2026-07-12T10:29:09.624582Z"
+  }
+]

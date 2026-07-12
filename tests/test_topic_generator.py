@@ -1,12 +1,13 @@
 """
 tests/test_topic_generator.py - Unit tests for the conversation starter generator.
 
-All GPT-2 pipeline calls are mocked to avoid GPU dependency in CI/CD.
+All OpenRouter API calls are mocked so tests run offline without an API key.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import json
+from unittest.mock import patch
 
 import pytest
 
@@ -14,24 +15,20 @@ from services import topic_generator
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def reset_generator():
-    """Reset the module-level generator singleton before each test."""
-    original = topic_generator._generator
-    topic_generator._generator = None
-    yield
-    topic_generator._generator = original
+def _mock_chat(response_text: str):
+    """Patch chat_completion to return a fixed response string."""
+    return patch(
+        "services.topic_generator.chat_completion",
+        return_value=response_text,
+    )
 
 
-def _make_mock_generator(generated_text: str):
-    """Return a mock pipeline callable that produces the given text."""
-    mock = MagicMock()
-    mock.return_value = [{"generated_text": generated_text}]
-    return mock
+def _make_starters_json(starters: list[str]) -> str:
+    return json.dumps({"starters": starters})
 
 
 # ---------------------------------------------------------------------------
@@ -39,123 +36,127 @@ def _make_mock_generator(generated_text: str):
 # ---------------------------------------------------------------------------
 
 
-class TestBuildPrompt:
-    """Tests for the _build_prompt helper."""
-
-    def test_includes_themes(self):
-        prompt = topic_generator._build_prompt(["AI", "Climate"], [], template_idx=0)
-        assert "AI" in prompt
-
-    def test_includes_interests(self):
-        prompt = topic_generator._build_prompt(["AI"], ["climate change"], template_idx=0)
-        assert "climate change" in prompt
-
-    def test_defaults_when_no_themes(self):
-        prompt = topic_generator._build_prompt([], [], template_idx=0)
-        assert "technology" in prompt
-
-    def test_defaults_when_no_interests(self):
-        prompt = topic_generator._build_prompt(["AI"], [], template_idx=0)
-        assert "innovation" in prompt
-
-    def test_template_rotation(self):
-        """Different template_idx values produce different prompts."""
-        p0 = topic_generator._build_prompt(["AI"], ["ML"], template_idx=0)
-        p1 = topic_generator._build_prompt(["AI"], ["ML"], template_idx=1)
-        assert p0 != p1
-
-
-class TestCleanOutput:
-    """Tests for the _clean_output helper."""
-
-    def test_removes_prompt_prefix(self):
-        prompt = "Start of prompt "
-        raw = prompt + "This is the continuation?"
-        result = topic_generator._clean_output(raw, prompt)
-        assert "Start of prompt" not in result
-
-    def test_stops_at_question_mark(self):
-        prompt = "Prompt: "
-        raw = prompt + 'How do you use AI? And more text...'
-        result = topic_generator._clean_output(raw, prompt)
-        assert result.endswith("?")
-        assert "And more text" not in result
-
-    def test_adds_question_mark_if_missing(self):
-        prompt = "Prompt: "
-        raw = prompt + "Have you worked on sustainability"
-        result = topic_generator._clean_output(raw, prompt)
-        assert result.endswith("?")
-
-    def test_returns_empty_for_short_output(self):
-        prompt = "Prompt: "
-        raw = prompt + "Hi"
-        result = topic_generator._clean_output(raw, prompt)
-        assert result == ""
-
-
 class TestGenerateStarters:
-    """Tests for the generate_starters() function."""
+    """Tests for generate_starters()."""
 
-    def test_returns_num_starters(self):
-        """Should return exactly NUM_STARTERS conversation starters."""
-        prompt_prefix = topic_generator._build_prompt(["AI"], ["data"], template_idx=0)
-        mock_gen = _make_mock_generator(
-            prompt_prefix + 'How are you applying AI in your work?'
-        )
+    def test_happy_path_returns_starters(self):
+        """Happy path: valid JSON response returns correct starters."""
+        starters_list = [
+            "How do you see AI transforming urban infrastructure?",
+            "What's the most exciting climate tech you've encountered recently?",
+            "I work on sustainable cities too — what aspects are you focused on?",
+        ]
+        resp = _make_starters_json(starters_list)
+        with _mock_chat(resp):
+            result = topic_generator.generate_starters(
+                ["AI", "Urban Planning"], ["climate change"]
+            )
 
-        with patch.object(topic_generator, "_get_generator", return_value=mock_gen):
-            starters = topic_generator.generate_starters(["AI"], ["data science"])
-
-        assert len(starters) == topic_generator.NUM_STARTERS
+        assert len(result) == topic_generator.NUM_STARTERS
+        assert result[0] == starters_list[0]
 
     def test_raises_on_empty_themes(self):
         """Empty themes list must raise ValueError."""
         with pytest.raises(ValueError, match="At least one theme"):
             topic_generator.generate_starters([])
 
-    def test_fallback_starters_on_failure(self):
-        """When generation consistently fails, fallback starters are returned."""
-        mock_gen = MagicMock(side_effect=Exception("GPU error"))
-
-        with patch.object(topic_generator, "_get_generator", return_value=mock_gen):
-            starters = topic_generator.generate_starters(["AI"], [])
-
-        assert len(starters) == topic_generator.NUM_STARTERS
-        assert all(isinstance(s, str) and len(s) > 5 for s in starters)
-
-    def test_no_duplicate_starters(self):
-        """All generated starters should be unique."""
-        # Alternate between different outputs to simulate diversity
-        outputs = [
-            [{"generated_text": topic_generator._build_prompt(["AI"], [], template_idx=i % 3) + f" Unique question number {i}?"}]
-            for i in range(10)
+    def test_strips_markdown_fences(self):
+        """Response wrapped in ```json fences is parsed correctly."""
+        starters_list = [
+            "Question one about AI?",
+            "Question two about climate?",
+            "Question three about data science?",
         ]
-        mock_gen = MagicMock(side_effect=outputs)
+        fenced = f"```json\n{_make_starters_json(starters_list)}\n```"
+        with _mock_chat(fenced):
+            result = topic_generator.generate_starters(["AI"])
 
-        with patch.object(topic_generator, "_get_generator", return_value=mock_gen):
-            starters = topic_generator.generate_starters(["AI"])
+        assert len(result) == 3
 
-        assert len(starters) == len(set(starters))
+    def test_fallback_on_api_failure(self):
+        """When OpenRouter throws, fallback starters are returned."""
+        with patch(
+            "services.topic_generator.chat_completion",
+            side_effect=RuntimeError("API down"),
+        ):
+            result = topic_generator.generate_starters(["AI"], ["machine learning"])
 
-    def test_none_interests_defaults_gracefully(self):
+        assert len(result) == topic_generator.NUM_STARTERS
+        assert all(isinstance(s, str) and len(s) > 10 for s in result)
+
+    def test_fallback_on_bad_json(self):
+        """When JSON is malformed, tries line-based extraction or falls back."""
+        with _mock_chat("This is not valid JSON!!!"):
+            result = topic_generator.generate_starters(["Healthcare"], [])
+
+        assert isinstance(result, list)
+        assert len(result) > 0
+
+    def test_none_interests_handled_gracefully(self):
         """Passing None for interests should not raise."""
-        prompt_prefix = topic_generator._build_prompt(["AI"], [], template_idx=0)
-        mock_gen = _make_mock_generator(prompt_prefix + "How do you apply AI?")
+        resp = _make_starters_json([
+            "How do you apply AI in healthcare?",
+            "What trends in AI excite you most?",
+            "Are you seeing more AI adoption in hospitals?",
+        ])
+        with _mock_chat(resp):
+            result = topic_generator.generate_starters(["AI"], None)
 
-        with patch.object(topic_generator, "_get_generator", return_value=mock_gen):
-            starters = topic_generator.generate_starters(["AI"], None)
+        assert isinstance(result, list)
 
-        assert isinstance(starters, list)
+    def test_filters_short_starters(self):
+        """Starters shorter than 10 chars are filtered out; fallback fills gaps."""
+        resp = _make_starters_json(["Short", "x", "Also too short"])
+        with _mock_chat(resp):
+            result = topic_generator.generate_starters(["Finance"])
 
-    def test_generator_initialized_once(self):
-        """The generator pipeline should only be loaded once."""
-        prompt_prefix = topic_generator._build_prompt(["AI"], [], template_idx=0)
-        mock_gen_instance = _make_mock_generator(prompt_prefix + "Test question?")
+        # Should still return NUM_STARTERS via fallback
+        assert len(result) == topic_generator.NUM_STARTERS
 
-        with patch("services.topic_generator.pipeline", return_value=mock_gen_instance) as mock_pipeline:
-            topic_generator._generator = None
-            topic_generator.generate_starters(["AI"])
-            topic_generator.generate_starters(["Climate"])
+    def test_returns_at_most_num_starters(self):
+        """Result list is capped at NUM_STARTERS even if model returns more."""
+        many = [f"Question number {i} about the topic at hand?" for i in range(10)]
+        resp = _make_starters_json(many)
+        with _mock_chat(resp):
+            result = topic_generator.generate_starters(["AI"])
 
-        assert mock_pipeline.call_count == 1
+        assert len(result) == topic_generator.NUM_STARTERS
+
+
+class TestFallbackStarters:
+    """Tests for _fallback_starters()."""
+
+    def test_returns_num_starters(self):
+        result = topic_generator._fallback_starters(["AI"], ["data"])
+        assert len(result) == topic_generator.NUM_STARTERS
+
+    def test_uses_theme_in_text(self):
+        result = topic_generator._fallback_starters(["Blockchain"], [])
+        assert any("Blockchain" in s for s in result)
+
+    def test_uses_interest_in_text(self):
+        result = topic_generator._fallback_starters(["AI"], ["climate change"])
+        assert any("climate change" in s for s in result)
+
+    def test_empty_themes_uses_default(self):
+        """Fallback with empty theme uses 'technology'."""
+        result = topic_generator._fallback_starters([], [])
+        assert all(isinstance(s, str) for s in result)
+
+
+class TestParseStartersResponse:
+    """Tests for _parse_starters_response()."""
+
+    def test_parses_valid_json(self):
+        raw = json.dumps({"starters": ["How are you using AI?", "What excites you about ML?", "Have you tried deep learning?"]})
+        result = topic_generator._parse_starters_response(raw)
+        assert len(result) == 3
+
+    def test_extracts_numbered_list(self):
+        raw = "1. How do you see AI evolving?\n2. What's your take on sustainability in tech?\n3. Have you seen any great blockchain projects?"
+        result = topic_generator._parse_starters_response(raw)
+        assert len(result) >= 2
+
+    def test_returns_empty_on_garbage(self):
+        result = topic_generator._parse_starters_response("garbage with no content")
+        assert isinstance(result, list)

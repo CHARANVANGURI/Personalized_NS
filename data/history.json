@@ -1,1 +1,30 @@
-[]
+[
+  {
+    "conversation_id": "d217f8bc-b4c6-47ec-943e-5b7039576dc5",
+    "timestamp": "2026-07-12T10:27:12.508384Z",
+    "event_description": "Tech star meet up",
+    "themes": [
+      "Startups",
+      "Entrepreneurship",
+      "AI",
+      "Data Science",
+      "Finance"
+    ],
+    "scores": [
+      0.93,
+      0.88,
+      0.74,
+      0.62,
+      0.51
+    ],
+    "starters": [
+      "How do you see emerging AI tools reshaping early-stage startup product development, and what challenges have you encountered integrating them into limited resources?",
+      "I’m fascinated by how data science-driven finance models are unlocking new funding pathways for entrepreneurs—what recent examples have caught your eye?",
+      "From your experience, which AI ethics considerations are most critical for fintech startups aiming to scale responsibly, and how do you address them?"
+    ],
+    "user_interests": [
+      "ai"
+    ],
+    "favorite": false
+  }
+]

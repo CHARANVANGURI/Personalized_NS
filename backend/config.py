@@ -37,14 +37,23 @@ API_DESCRIPTION: str = (
 )
 
 # ---------------------------------------------------------------------------
-# ML Models
+# OpenRouter (replaces local HuggingFace models)
 # ---------------------------------------------------------------------------
-ZERO_SHOT_MODEL: str = os.getenv(
-    "ZERO_SHOT_MODEL", "cross-encoder/nli-distilroberta-base"
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL: str = os.getenv(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
-TEXT_GEN_MODEL: str = os.getenv("TEXT_GEN_MODEL", "gpt2")
+OPENROUTER_MODEL: str = os.getenv(
+    "OPENROUTER_MODEL", "openai/gpt-oss-120b:free"
+)
+YOUR_SITE_URL: str = os.getenv("YOUR_SITE_URL", "http://localhost:8501")
+YOUR_SITE_NAME: str = os.getenv(
+    "YOUR_SITE_NAME", "Personalized-Networking-Assistant"
+)
 
-# Candidate classification labels for event analysis
+# ---------------------------------------------------------------------------
+# Event Analysis - candidate labels
+# ---------------------------------------------------------------------------
 CANDIDATE_LABELS: list[str] = [
     "AI",
     "Sustainability",
@@ -63,9 +72,8 @@ CANDIDATE_LABELS: list[str] = [
 # ---------------------------------------------------------------------------
 # Generation Parameters
 # ---------------------------------------------------------------------------
-MAX_NEW_TOKENS: int = int(os.getenv("MAX_NEW_TOKENS", "80"))
+MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "500"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.8"))
-TOP_P: float = float(os.getenv("TOP_P", "0.95"))
 NUM_STARTERS: int = int(os.getenv("NUM_STARTERS", "3"))
 
 # ---------------------------------------------------------------------------
