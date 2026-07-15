@@ -44,7 +44,7 @@ OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
 OPENROUTER_MODEL: str = os.getenv(
-    "OPENROUTER_MODEL", "openai/gpt-oss-120b:free"
+    "OPENROUTER_MODEL", "openai/gpt-oss-20b:free"
 )
 YOUR_SITE_URL: str = os.getenv("YOUR_SITE_URL", "http://localhost:8501")
 YOUR_SITE_NAME: str = os.getenv(
